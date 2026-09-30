@@ -1,0 +1,5 @@
+# dsh-sidebar-preview bundle layer: inserts the plugin row.
+# Loaded by `dsh plugin --profile <name> add <path-or-package>`.
+- insert:
+    - id: dsh-sidebar-preview
+      name: 'dsh-sidebar-preview'

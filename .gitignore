@@ -1,0 +1,30 @@
+# --- 凭据与本地状态：绝不入库 ---
+*.local.json
+*.secret.json
+.credentials.yaml
+credentials.yaml
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+token.txt
+cookie.txt
+
+# --- 依赖与构建产物 ---
+node_modules/
+dist/
+build/
+*.tgz
+
+# --- 运行时状态（含 SendKey 等本机配置）---
+notify-config.json
+serverchan-notify.json
+
+# --- 编辑器 / 系统 ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc

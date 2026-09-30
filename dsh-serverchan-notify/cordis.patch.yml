@@ -1,0 +1,5 @@
+# dsh-serverchan-notify bundle layer: inserts the plugin row.
+# Loaded by `dsh plugin --profile <name> add <path-or-package>`.
+- insert:
+    - id: dsh-serverchan-notify
+      name: 'dsh-serverchan-notify'

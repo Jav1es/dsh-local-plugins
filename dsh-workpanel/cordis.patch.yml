@@ -1,0 +1,4 @@
+# dsh-workpanel bundle layer: inserts the plugin row.
+- insert:
+    - id: dsh-workpanel
+      name: 'dsh-workpanel'
