@@ -1,0 +1,118 @@
+name: CI
+
+# 本仓库是「多个 DSH 插件的集合」，没有根 package.json。
+# 因此 CI 只做「每个插件各自可加载」的最小契约检查，不引入安装步骤
+# （插件的依赖由 DSH 宿主提供，CI 里装不出来，装了也是假的绿）。
+#
+# 检查项：
+#   1. 每个插件目录的必需文件齐全（package.json / lib/index.js / cordis.patch.yml）
+#   2. package.json 合法且 name/version/main/files 字段自洽
+#   3. 所有 JS 文件通过 node --check（语法）
+#   4. 敏感信息扫描（本机绝对路径 / 常见凭据形态）
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: 插件契约 + 语法
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: 发现插件目录
+        id: discover
+        run: |
+          # 插件目录 = 含 package.json 的一级子目录，且不是备份目录
+          dirs=""
+          for d in */; do
+            d="${d%/}"
+            case "$d" in
+              *.bak-*) continue ;;
+            esac
+            if [ -f "$d/package.json" ]; then
+              dirs="$dirs $d"
+            fi
+          done
+          dirs="${dirs# }"
+          if [ -z "$dirs" ]; then
+            echo "::error::没有发现任何插件目录（含 package.json 的一级子目录）"
+            exit 1
+          fi
+          echo "发现插件：$dirs"
+          echo "dirs=$dirs" >> "$GITHUB_OUTPUT"
+
+      - name: 必需文件检查
+        run: |
+          fail=0
+          for d in ${{ steps.discover.outputs.dirs }}; do
+            for f in package.json lib/index.js cordis.patch.yml; do
+              if [ ! -f "$d/$f" ]; then
+                echo "::error file=$d::$d 缺少必需文件 $f"
+                fail=1
+              fi
+            done
+          done
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "✅ 所有插件的必需文件齐全"
+
+      - name: package.json 字段自洽
+        run: |
+          node -e '
+          const fs = require("fs");
+          const dirs = process.argv[1].split(/\s+/).filter(Boolean);
+          let bad = 0;
+          for (const d of dirs) {
+            const p = JSON.parse(fs.readFileSync(d + "/package.json", "utf8"));
+            const problems = [];
+            if (!p.name) problems.push("缺 name");
+            if (!p.version || !/^\d+\.\d+\.\d+/.test(p.version)) problems.push("version 不合法: " + p.version);
+            if (!p.main) problems.push("缺 main");
+            else if (!fs.existsSync(d + "/" + p.main.replace(/^\.\//, ""))) problems.push("main 指向的文件不存在: " + p.main);
+            if (problems.length) {
+              console.log("::error file=" + d + "/package.json::" + d + " → " + problems.join("; "));
+              bad++;
+            } else {
+              console.log("✅ " + d + " v" + p.version);
+            }
+          }
+          if (bad) process.exit(1);
+          ' "${{ steps.discover.outputs.dirs }}"
+
+      - name: JS 语法检查
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            if ! node --check "$f"; then
+              echo "::error file=$f::语法错误"
+              fail=1
+            fi
+          done < <(find . -name '*.js' -not -path './.git/*' -not -path '*/node_modules/*' -not -path '*.bak-*')
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "✅ 所有 JS 文件语法通过"
+
+      - name: 敏感信息扫描
+        run: |
+          # 公开仓库不应出现本机绝对路径或凭据
+          hits=$(grep -rInE 'C:\\\\Users\\\\|/Users/[A-Za-z0-9_.-]+/|D:\\\\Jav1e' \
+                 --exclude-dir=.git --exclude-dir=node_modules . || true)
+          if [ -n "$hits" ]; then
+            echo "::error::发现疑似本机绝对路径"
+            echo "$hits"
+            exit 1
+          fi
+          echo "✅ 未发现本机绝对路径"
