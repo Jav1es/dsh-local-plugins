@@ -27,6 +27,10 @@ const TELEGRAM_API = 'https://api.telegram.org'
 
 /** Default config (written on first run). */
 const DEFAULT_CONFIG = {
+  // 企业微信群机器人 Webhook 完整 URL（形如
+  // https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<uuid>）。空 = 该通道禁用。
+  // 2026-10-14 新增：与 sendKey 独立，两者可同时启用。
+  wecomWebhook: '',
   // Server酱 SendKey（形如 SCT...）。空 = 禁用出站推送。
   sendKey: '',
   // Telegram Bot Token（形如 123456:ABC...）。空 = 禁用入站回复。
@@ -100,6 +104,22 @@ function saveState(state) {
 }
 
 /** Extract the plain-text body from an assistant message content array. */
+/**
+ * 从 assistant/message 的 data.stream 末尾读取模型结束原因。
+ * 实测结构：stream[-1] = { type:'finish', chunk:{ reason:{ kind:'stop'|'tool-calls'|'length'|… } } }
+ * 返回 null 表示读不到（此时按"最终回复"处理，不阻塞推送）。
+ */
+function readFinishKind(data) {
+  const stream = data?.stream
+  if (!Array.isArray(stream) || stream.length === 0) return null
+  for (let i = stream.length - 1; i >= 0; i--) {
+    const item = stream[i]
+    const kind = item?.chunk?.reason?.kind ?? item?.reason?.kind
+    if (typeof kind === 'string') return kind
+  }
+  return null
+}
+
 function extractText(data) {
   const content = data?.message?.content
   if (!Array.isArray(content)) return ''
@@ -150,6 +170,39 @@ async function sendToServerChan(sendKey, title, desp) {
   } catch (error) {
     if (error?.name !== 'AbortError') {
       console.warn(`[dsh-serverchan-notify] 推送失败: ${error?.message || error}`)
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * POST a text message to a WeCom (企业微信) group robot.
+ * Body format differs from Server酱: { msgtype: 'text', text: { content } }.
+ * Never throws.
+ */
+async function sendToWecom(webhookUrl, title, desp) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 10_000)
+  try {
+    const content = title ? `${title}\n\n${desp || ''}`.trim() : String(desp || '')
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ msgtype: 'text', text: { content } }),
+      signal: controller.signal
+    })
+    if (!res.ok) {
+      console.warn(`[dsh-serverchan-notify] 企业微信 返回 HTTP ${res.status}`)
+      return
+    }
+    const json = await res.json().catch(() => null)
+    if (json && json.errcode !== 0) {
+      console.warn(`[dsh-serverchan-notify] 企业微信 errcode=${json.errcode} errmsg=${json.errmsg || ''}`)
+    }
+  } catch (error) {
+    if (error?.name !== 'AbortError') {
+      console.warn(`[dsh-serverchan-notify] 企业微信推送失败: ${error?.message || error}`)
     }
   } finally {
     clearTimeout(timer)
@@ -318,11 +371,32 @@ export function apply(ctx) {
   // ---- OUTBOUND: remember latest session + push to Server酱 ----------------
   ctx.on('session/event', (session, event) => {
     try {
+      // 事件选择（2026-10-14 实测会话日志 session.v4.jsonl 确认）：
+      //   DSH 0.2.x 事件流里——
+      //     · `assistant/message`：data.message.content 是回复文本（**推送数据源**），
+      //       但一轮会产生 N 条（每个 step 一条，实测 2~36 条），且 content 混着
+      //       {type:'text'} 与 {type:'tool-call'}，必须只取纯文本、且靠去重避免刷屏。
+      //     · `turn/end`：data.turn 只是轮次序号(number)，data.reason 是结束原因，**不含文本**。
+      //   ⇒ 触发点选 assistant/message；结束原因挂在 data.stream 末块的 finish.reason.kind。
       if (event?.type !== 'assistant/message') return
+
       const cfg = loadConfig()
 
-      const text = extractText(event.data)
+      // 只取文本块：纯工具调用步骤没有文本，跳过（否则会推一堆空通知）。
+      const content = event.data?.message?.content
+      if (!Array.isArray(content)) return
+      const textParts = content
+        .filter((p) => p && p.type === 'text' && typeof p.text === 'string' && p.text.trim())
+        .map((p) => p.text)
+      const text = textParts.join('\n').trim()
       if (!text) return
+
+      // 结束原因：tool-calls 表示本轮还要继续调工具（不是最终回复），stop/end 才算收尾。
+      const finishKind = readFinishKind(event.data)
+      const isFinal = finishKind === null || finishKind === 'stop' || finishKind === 'end' || finishKind === 'length'
+      // 只有纯文本收尾才推；带工具调用的中间步骤不推（否则一轮刷十几条）。
+      const hasToolCall = content.some((p) => p && (p.type === 'tool-call' || p.type === 'tool_call'))
+      if (!isFinal || hasToolCall) return
 
       const sessionId = session?.id || 'unknown'
       const sessionTitle = (session?.header?.title || '').trim()
@@ -336,7 +410,9 @@ export function apply(ctx) {
       // Always remember this as the latest active session (drives inbound).
       saveState({ sessionId, title: sessionTitle, updatedAt: Date.now() })
 
-      if (!cfg.sendKey) return // outbound disabled
+      // 两个出站通道独立开关：配置了 wecomWebhook 就发企微，配置了 sendKey 就发 Server酱。
+      // 都没有则只记录 latest session（供 Telegram 入站回复使用），不发推送。
+      if (!cfg.wecomWebhook && !cfg.sendKey) return
       const now = Date.now()
       const minMs = (cfg.minIntervalSec || 0) * 1000
       if (minMs > 0) {
@@ -369,7 +445,12 @@ export function apply(ctx) {
         if (!oldest.done) lastSend.delete(oldest.value)
       }
 
-      void sendToServerChan(cfg.sendKey, title, desp)
+      if (cfg.wecomWebhook) {
+        void sendToWecom(cfg.wecomWebhook, title, desp)
+      }
+      if (cfg.sendKey) {
+        void sendToServerChan(cfg.sendKey, title, desp)
+      }
     } catch (error) {
       console.warn(`[dsh-serverchan-notify] 事件处理失败: ${error?.message || error}`)
     }
@@ -389,10 +470,16 @@ export function apply(ctx) {
   // Announce startup state.
   try {
     const cfg = loadConfig()
-    if (!cfg.sendKey) {
-      console.warn(`[dsh-serverchan-notify] 未配置 sendKey，出站推送停用。配置文件：${cfg.cfgPath}`)
-    } else {
-      console.log(`[dsh-serverchan-notify] 出站已启用 mode=${cfg.mode}，SendKey=${cfg.sendKey.slice(0, 6)}…`)
+    if (cfg.wecomWebhook) {
+      let host = ''
+      try { host = new URL(cfg.wecomWebhook).host } catch { host = '<URL 解析失败>' }
+      console.log(`[dsh-serverchan-notify] 企业微信出站已启用 mode=${cfg.mode}，host=${host}`)
+    }
+    if (cfg.sendKey) {
+      console.log(`[dsh-serverchan-notify] Server酱出站已启用，SendKey=${cfg.sendKey.slice(0, 6)}…`)
+    }
+    if (!cfg.wecomWebhook && !cfg.sendKey) {
+      console.warn(`[dsh-serverchan-notify] 未配置 wecomWebhook / sendKey，出站推送停用。配置文件：${cfg.cfgPath}`)
     }
     if (!cfg.telegramBotToken) {
       console.warn(`[dsh-serverchan-notify] 未配置 telegramBotToken，入站回复停用。配置文件：${cfg.cfgPath}`)

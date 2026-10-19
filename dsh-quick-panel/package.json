@@ -1,0 +1,34 @@
+{
+  "name": "dsh-quick-panel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "侧边栏按钮 + 中列快捷面板：① 会话视图切换 ② 对话区显示选项 ③ 右侧栏 Tab 切换。纯官方 Slot/Service 接线，不改 DSH 源码。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "slots",
+        "layout",
+        "sessions",
+        "sidebarRight",
+        "sidebarRightTabs"
+      ],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml"
+  ],
+  "license": "MIT"
+}
